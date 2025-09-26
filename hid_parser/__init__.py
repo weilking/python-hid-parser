@@ -274,6 +274,36 @@ class UsageValue:
     def absolute(self) -> bool:
         return self._item.absolute
 
+class UsageValueArray:
+    def __init__(self, item: MainItem, values: list[int]):
+        self._item = item
+        self._value = values
+
+    def __int__(self) -> list[int]:
+        return self.value
+
+    def __repr__(self) -> str:
+        return repr(self.value)
+
+    @property
+    def value(self) -> list[int] | list[bool]:
+        return self._value
+
+    @property
+    def constant(self) -> bool:
+        return self._item.constant
+
+    @property
+    def data(self) -> bool:
+        return self._item.data
+
+    @property
+    def relative(self) -> bool:
+        return self._item.relative
+
+    @property
+    def absolute(self) -> bool:
+        return self._item.absolute
 
 class VendorUsageValue(UsageValue):
     def __init__(
@@ -662,22 +692,69 @@ class ReportDescriptor:
     def get_feature_report_size(self, report_id: int | None = None) -> BitNumber:
         return self._get_report_size(self.get_feature_items(report_id))
 
+    @staticmethod
+    def _add_usage_value(u: Usage, v: UsageValue, parsed: dict[Usage, UsageValue]) -> None:
+        """Add a UsageValue into parsed, converting to a UsageValueArray or
+        appending to existing arrays/vendor lists when duplicates are found.
+        """
+        if u not in parsed:
+            parsed[u] = v
+            return
+
+        existing = parsed[u]
+
+        # VendorUsageValue already manages an internal list
+        if isinstance(existing, VendorUsageValue):
+            # append raw value if possible
+            try:
+                existing.list.append(int(v.value))
+            except Exception:
+                # fall back to replacing if something unexpected occurs
+                parsed[u] = v
+            return
+
+        # If existing is a UsageValueArray, extend its internal list
+        if isinstance(existing, UsageValueArray):
+            try:
+                existing._value.append(v.value)  # type: ignore[attr-defined]
+            except Exception:
+                # unexpected, replace
+                parsed[u] = v
+            return
+
+        # existing is a single UsageValue -> create a UsageValueArray
+        if isinstance(existing, UsageValue):
+            try:
+                # build a new UsageValueArray preserving the original item
+                new_vals = [existing.value, v.value]
+                new_arr = UsageValueArray(existing._item, new_vals)  # type: ignore[attr-defined]
+                parsed[u] = new_arr
+            except Exception:
+                # fallback: warn and override
+                warnings.warn(HIDReportWarning(f'Overriding usage: {u}'), stacklevel=2)
+                parsed[u] = v
+            return
+
+        # Unknown stored type: warn and override
+        warnings.warn(HIDReportWarning(f'Overriding usage: {u} (unknown stored type)'), stacklevel=2)
+        parsed[u] = v
+
     def _parse_report_items(self, items: list[BaseItem], data: Sequence[int]) -> dict[Usage, UsageValue]:
         parsed: dict[Usage, UsageValue] = {}
+
         for item in items:
             if isinstance(item, VariableItem):
-                parsed[item.usage] = item.parse(data)
+                self._add_usage_value(item.usage, item.parse(data), parsed)
             elif isinstance(item, ArrayItem):
                 usage_values = item.parse(data)
-                for usage in usage_values:
-                    if usage in parsed:
-                        warnings.warn(HIDReportWarning(f'Overriding usage: {usage}'), stacklevel=2)
-                parsed.update(usage_values)
+                for usage, usage_value in usage_values.items():
+                    self._add_usage_value(usage, usage_value, parsed)
             elif isinstance(item, PaddingItem):
                 pass
             else:
                 msg = f'Unknown item: {item}'
                 raise TypeError(msg)
+
         return parsed
 
     def _parse_report(self, item_poll: _ITEM_POOL, data: Sequence[int]) -> dict[Usage, UsageValue]:
